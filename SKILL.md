@@ -8,3 +8,4 @@
 - **Go Context & Concurrency**: Vital for non-blocking UI during API fetching.
 - **Time/Timezone Handling**: Required for offline mode and displaying timezone/time contextually.
 - **Tools validation**: Ability to routinely run `golangci-lint run` before validating changes.
+- **Distribution Knowledge**: The project leverages cross-OS/Arch github-actions for releasing native Go binaries and respects the internal `go install` module path structure.

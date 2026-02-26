@@ -1,0 +1,97 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Auto Tag and Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: '0'
+
+      - name: Bump version and push tag
+        id: tag_version
+        run: |
+          # Fetch all tags so we can determine the latest
+          git fetch --tags
+          
+          # Get the latest tag, default to v0.0.0 if none exists
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          
+          # Strip 'v' and split into Major.Minor.Patch
+          VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          
+          # Handle cases where tag isn't strictly semver
+          if [[ -z "$MAJOR" ]]; then MAJOR=0; fi
+          if [[ -z "$MINOR" ]]; then MINOR=0; fi
+          if [[ -z "$PATCH" ]]; then PATCH=0; fi
+          
+          # Increment the patch
+          PATCH=$((PATCH + 1))
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          
+          # Configure Git and create the tag
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git tag $NEW_TAG
+          git push origin $NEW_TAG
+          
+          # Output for the release step
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Build macOS amd64
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: go build -o weather-tui-darwin-amd64 .
+
+      - name: Build macOS arm64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: go build -o weather-tui-darwin-arm64 .
+
+      - name: Build Linux amd64
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: go build -o weather-tui-linux-amd64 .
+
+      - name: Build Linux arm64
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: go build -o weather-tui-linux-arm64 .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag_version.outputs.new_tag }}
+          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          files: |
+            weather-tui-darwin-amd64
+            weather-tui-darwin-arm64
+            weather-tui-linux-amd64
+            weather-tui-linux-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

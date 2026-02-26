@@ -3,6 +3,7 @@
 ## Expectations
 - **Architecture**: Terminal User Interface (TUI) application
 - **Platform**: Mac and Linux (arm64, amd64)
+- **Deployment**: Automatic releases via `.github/workflows/release.yml` matrices.
 - **Language**: Go
 - **Workflow**:
   - Work incrementally.
