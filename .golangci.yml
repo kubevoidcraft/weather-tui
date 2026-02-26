@@ -1,0 +1,65 @@
+# golangci-lint config
+version: "2"
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  disable-all: true
+  enable:
+    # Security & Error Handling
+    - gosec          # Inspects source code for security problems
+    - errcheck       # Checks for unchecked errors
+    - govet          # Reports suspicious constructs (shadowing, etc.)
+    - revive         # Modern replacement for golint
+    
+    # Performance & Cleanliness
+    - gocyclo        # Computes functions complexity
+    - staticcheck    # Advanced static analysis
+    - unused         # Checks for unused constants, variables, etc.
+    - misspell       # Finds commonly misspelled English words in comments
+    - bodyclose      # Checks whether HTTP response bodies are closed
+    - prealloc       # Finds slice declarations that could potentially be preallocated
+
+linters-settings:
+  gosec:
+    # Specifically check for weak crypto and file permissions
+    severity: medium
+    confidence: high
+  
+  revive:
+    rules:
+      - name: exported
+        disabled: true
+      - name: package-comments
+        disabled: true
+      - name: blank-imports
+        disabled: true
+      - name: var-naming
+        disabled: true
+      - name: unused-parameter
+        disabled: true
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - linters: [gosec]
+      text: "Log injection via taint analysis"
+    - linters: [gosec]
+      text: "SQL string formatting"
+    - linters: [gosec]
+      text: "integer overflow conversion"
+    - linters: [revive]
+      text: "should have a package comment"
+    - linters: [revive]
+      text: "exported (.*) should have comment or be unexported"
+    - linters: [revive]
+      text: "blank-imports:"
+    - linters: [revive]
+      text: "var-naming:"
+    - linters: [revive]
+      text: "unused-parameter:"
+    - linters: [revive]
+      text: "comment on exported function"

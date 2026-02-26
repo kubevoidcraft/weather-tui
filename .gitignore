@@ -1,0 +1,7 @@
+*.db
+*.log
+weather-tui
+dist/
+.DS_Store
+.vscode/
+.idea/
