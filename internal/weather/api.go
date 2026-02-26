@@ -73,8 +73,8 @@ func SearchCities(query string) ([]City, error) {
 	return res.Results, nil
 }
 
-// GetForecast calls the Open-Meteo Forecast API for the given coordinates and timezone.
-func GetForecast(lat, lon float64, timezone string) (*Forecast, error) {
+// GetForecast calls the Open-Meteo Forecast API for the given coordinates, timezone, and units.
+func GetForecast(lat, lon float64, timezone, tempUnit, windUnit string) (*Forecast, error) {
 	client := &http.Client{Timeout: clientTimeout}
 
 	// Open-Meteo requires timezone to align the daily aggregations correctly
@@ -83,8 +83,8 @@ func GetForecast(lat, lon float64, timezone string) (*Forecast, error) {
 	}
 
 	reqURL := fmt.Sprintf(
-		"%s?latitude=%f&longitude=%f&current=temperature_2m,wind_speed_10m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=%s",
-		weatherAPIURL, lat, lon, url.QueryEscape(timezone),
+		"%s?latitude=%f&longitude=%f&current=temperature_2m,wind_speed_10m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=%s&temperature_unit=%s&wind_speed_unit=%s",
+		weatherAPIURL, lat, lon, url.QueryEscape(timezone), url.QueryEscape(tempUnit), url.QueryEscape(windUnit),
 	)
 
 	resp, err := client.Get(reqURL)

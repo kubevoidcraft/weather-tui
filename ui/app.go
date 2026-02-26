@@ -16,7 +16,8 @@ type App struct {
 	App           *tview.Application
 	Pages         *tview.Pages
 	MainFlex      *tview.Flex
-	Header        *tview.TextView
+	HeaderFlex    *tview.Flex
+	HeaderInfo    *tview.TextView
 	Sidebar       *tview.List
 	MainView      *tview.TextView
 	CmdInput      *tview.InputField
@@ -25,7 +26,19 @@ type App struct {
 	CurrentCity   *weather.City
 	SearchList    *tview.List
 	SearchResults []weather.City
+	SettingsForm  *tview.Form
 }
+
+const asciiArt = `
+  [teal] _ _ _         _   _              [yellow]_____ _   _ _____ 
+  [teal]| | | |___ ___| |_| |_ ___ ___    [yellow]|_   _| | | |     |
+  [teal]| | | | -_| .'|  _|   | -_|  _|     [yellow]| | | |_| |-   -|
+  [teal]|_____|___|__,|_| |_|_|___|_|       [yellow]|_| |___|_____|[-]
+
+  Press [yellow]'/'[-] to search        Press [yellow]'f'[-] to toggle favorite
+  Press [yellow]'Tab'[-] to switch        Press [yellow]'1'-'5'[-] to load favorite
+  Press [yellow]'u'[-] to config units      Press [yellow]'q'[-] or Ctrl+C to quit
+`
 
 // NewApp creates and initializes a new App instance with all UI components.
 func NewApp() *App {
@@ -37,11 +50,12 @@ func NewApp() *App {
 
 	// Material Design Theme Colors
 	bgColor := tview.Styles.PrimitiveBackgroundColor
-	primaryColor := tcell.ColorTeal
 
-	header := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignCenter)
-	header.SetBackgroundColor(primaryColor)
-	header.SetTextColor(tcell.ColorWhite)
+	headerInfo := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignCenter)
+	headerInfo.SetBackgroundColor(bgColor)
+
+	headerFlex := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(headerInfo, 0, 1, false)
 
 	sidebar := tview.NewList().ShowSecondaryText(true).SetMainTextColor(tcell.ColorWhite).SetSecondaryTextColor(tcell.ColorSilver).SetSelectedBackgroundColor(tcell.ColorDarkCyan)
 
@@ -52,16 +66,21 @@ func NewApp() *App {
 
 	searchList := tview.NewList().ShowSecondaryText(true).SetMainTextColor(tcell.ColorWhite).SetSecondaryTextColor(tcell.ColorDarkGray).SetSelectedBackgroundColor(tcell.ColorTeal)
 
+	settingsForm := tview.NewForm()
+	settingsForm.SetBorder(true).SetTitle(" Preferences ").SetTitleColor(tcell.ColorTeal).SetBorderColor(tcell.ColorTeal)
+
 	a := &App{
-		App:        tview.NewApplication(),
-		Pages:      tview.NewPages(),
-		MainFlex:   tview.NewFlex(), // No background color, inherits default
-		Header:     header,
-		Sidebar:    sidebar,
-		MainView:   mainView,
-		CmdInput:   cmdInput,
-		Config:     cfg,
-		SearchList: searchList,
+		App:          tview.NewApplication(),
+		Pages:        tview.NewPages(),
+		MainFlex:     tview.NewFlex(), // No background color, inherits default
+		HeaderFlex:   headerFlex,
+		HeaderInfo:   headerInfo,
+		Sidebar:      sidebar,
+		MainView:     mainView,
+		CmdInput:     cmdInput,
+		Config:       cfg,
+		SearchList:   searchList,
+		SettingsForm: settingsForm,
 	}
 	a.setupUI()
 	return a
@@ -87,23 +106,116 @@ func (a *App) setupUI() {
 
 	// MainView setup
 	a.MainView.SetTitle(" Forecast ").SetBorder(false)
-	a.MainView.SetText("\n[teal]  Welcome to Weather TUI![-]\n\n  Press [yellow]'/'[-] to search for a city.\n  Press [yellow]'Tab'[-] to switch to Favorites.\n  Press [yellow]'q'[-] or Ctrl+C to quit.\n")
+	a.MainView.SetText("")
 
 	// Header setup
 	a.updateHeader()
 
-	// Content layout: Sidebar (left) + MainView (right)
+	// Content layout: Sidebar (left) + MainView (right) (25% / 75%)
 	contentFlex := tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(a.Sidebar, 20, 1, false).
+		AddItem(a.Sidebar, 0, 1, false).
 		AddItem(a.MainView, 0, 3, true)
 
-	// Root layout: Header + Content
+	// Root layout: Header + Content (40% / 60%)
 	a.MainFlex.SetDirection(tview.FlexRow).
-		AddItem(a.Header, 1, 1, false).
-		AddItem(contentFlex, 0, 1, true)
+		AddItem(a.HeaderFlex, 0, 4, false).
+		AddItem(contentFlex, 0, 6, true)
 
 	// Add to Pages
 	a.Pages.AddPage("main", a.MainFlex, true, true)
+
+	// Settings Form Setup
+	tempOptions := []string{"celsius", "fahrenheit"}
+	windOptions := []string{"kmh", "ms", "mph"}
+
+	tempIdx := 0
+	if a.Config.TemperatureUnit == "fahrenheit" {
+		tempIdx = 1
+	}
+
+	windIdx := 0
+	switch a.Config.WindUnit {
+	case "ms":
+		windIdx = 1
+	case "mph":
+		windIdx = 2
+	}
+
+	// Temporary variables for holding selection until "Save" is clicked
+	selectedTemp := a.Config.TemperatureUnit
+	selectedWind := a.Config.WindUnit
+
+	a.SettingsForm.SetButtonBackgroundColor(tcell.ColorDarkCyan)
+	a.SettingsForm.SetButtonTextColor(tcell.ColorWhite)
+	a.SettingsForm.SetFieldBackgroundColor(tcell.ColorDarkSlateGray)
+	a.SettingsForm.SetFieldTextColor(tcell.ColorWhite)
+	a.SettingsForm.SetLabelColor(tcell.ColorTeal)
+
+	a.SettingsForm.AddDropDown("Temperature", tempOptions, tempIdx, func(option string, _ int) {
+		selectedTemp = option
+	})
+
+	a.SettingsForm.AddDropDown("Wind Speed", windOptions, windIdx, func(option string, _ int) {
+		selectedWind = option
+	})
+
+	a.SettingsForm.AddButton("Save", func() {
+		a.Config.TemperatureUnit = selectedTemp
+		a.Config.WindUnit = selectedWind
+		_ = a.Config.Save()
+		if a.CurrentCity != nil {
+			go a.fetchForecast(*a.CurrentCity)
+		}
+		a.Pages.HidePage("settings")
+		a.App.SetFocus(a.MainView)
+	})
+
+	a.SettingsForm.AddButton("Close", func() {
+		// Just hide, don't save
+		a.Pages.HidePage("settings")
+		a.App.SetFocus(a.MainView)
+	})
+
+	a.SettingsForm.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			a.Pages.HidePage("settings")
+			a.App.SetFocus(a.MainView)
+			return nil
+		}
+
+		// Check if a dropdown is currently focused and open
+		itemIndex, _ := a.SettingsForm.GetFocusedItemIndex()
+		if itemIndex >= 0 && itemIndex < a.SettingsForm.GetFormItemCount() {
+			item := a.SettingsForm.GetFormItem(itemIndex)
+			if dd, ok := item.(*tview.DropDown); ok && dd.IsOpen() {
+				// Let the dropdown handle up/down natively when open
+				return event
+			}
+		}
+
+		// Map up/down arrows to tab/backtab to navigate between form fields
+		// rather than manipulating the dropdown list values immediately
+		if event.Key() == tcell.KeyDown {
+			return tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)
+		}
+		if event.Key() == tcell.KeyUp {
+			return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+		}
+
+		return event
+	})
+
+	// Center the settings form
+	settingsFlex := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(a.SettingsForm, 11, 1, true).
+			AddItem(nil, 0, 1, false),
+			40, 1, true).
+		AddItem(nil, 0, 1, false)
+
+	a.Pages.AddPage("settings", settingsFlex, true, false)
 
 	// Command Input handling
 	a.SearchList.SetTitle(" Suggestions ").SetBorder(true).SetBorderColor(tcell.ColorTeal)
@@ -155,6 +267,22 @@ func (a *App) setupUI() {
 	})
 
 	// Global Key Bindings
+	a.setupGlobalKeybindings()
+
+	a.App.SetRoot(a.Pages, true).EnableMouse(true)
+
+	// Start a goroutine to update the time in the header every second
+	go func() {
+		for {
+			time.Sleep(1 * time.Second)
+			a.App.QueueUpdateDraw(func() {
+				a.updateHeader()
+			})
+		}
+	}()
+}
+
+func (a *App) setupGlobalKeybindings() {
 	a.App.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		// If command input is already focused, let it handle the event
 		if a.App.GetFocus() == a.CmdInput {
@@ -179,8 +307,21 @@ func (a *App) setupUI() {
 			return nil
 		}
 
+		// Open settings modal
+		if event.Rune() == 'u' {
+			a.Pages.ShowPage("settings")
+			a.SettingsForm.SetFocus(0)
+			a.App.SetFocus(a.SettingsForm)
+			return nil
+		}
+
 		// Navigate focus between Sidebar and MainView
-		if event.Key() == tcell.KeyTab {
+		if event.Key() == tcell.KeyTab || event.Key() == tcell.KeyBacktab {
+			// Do not steal tab if settings page is frontmost
+			if frontPage, _ := a.Pages.GetFrontPage(); frontPage == "settings" {
+				return event
+			}
+
 			if a.App.GetFocus() == a.Sidebar {
 				a.App.SetFocus(a.MainView)
 			} else {
@@ -208,20 +349,20 @@ func (a *App) setupUI() {
 			return nil
 		}
 
+		// Load favorite 1-5
+		if event.Rune() >= '1' && event.Rune() <= '5' {
+			idx := int(event.Rune() - '1')
+			if idx < len(a.Config.Favorites) {
+				city := a.Config.Favorites[idx]
+				a.CurrentCity = &city
+				a.MainView.SetText(fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", city.Label()))
+				go a.fetchForecast(city)
+			}
+			return nil
+		}
+
 		return event
 	})
-
-	a.App.SetRoot(a.Pages, true).EnableMouse(true)
-
-	// Start a goroutine to update the time in the header every second
-	go func() {
-		for {
-			time.Sleep(1 * time.Second)
-			a.App.QueueUpdateDraw(func() {
-				a.updateHeader()
-			})
-		}
-	}()
 }
 
 func (a *App) hasItem(flex *tview.Flex, item tview.Primitive) bool {
@@ -284,22 +425,34 @@ func (a *App) executeSearch(query string) {
 }
 
 func (a *App) fetchForecast(city weather.City) {
-	forecast, err := weather.GetForecast(city.Lat, city.Lon, city.Timezone)
+	forecast, err := weather.GetForecast(city.Lat, city.Lon, city.Timezone, a.Config.TemperatureUnit, a.Config.WindUnit)
 	a.App.QueueUpdateDraw(func() {
 		if err != nil {
 			a.MainView.SetText(fmt.Sprintf("Error fetching forecast: %v", err))
 			return
 		}
 
-		// Update Header to show offline fallback vs Live Data?
-		// Already handled by updateHeader since CurrentCity is set
 		a.updateHeader()
+
+		// Determine unit labels based on config
+		tempLabel := "°C"
+		if a.Config.TemperatureUnit == "fahrenheit" {
+			tempLabel = "°F"
+		}
+
+		windLabel := "km/h"
+		switch a.Config.WindUnit {
+		case "ms":
+			windLabel = "m/s"
+		case "mph":
+			windLabel = "mph"
+		}
 
 		// Format output
 		out := fmt.Sprintf("\n  [white::b]📍 %s[-]\n  [gray]Timezone: %s[-]\n\n", city.Label(), city.Timezone)
 		out += "  [teal::b]Current Weather[-]\n"
-		out += fmt.Sprintf("  🌡️  [white]%.1f°C[-]\n", forecast.Current.Temperature2m)
-		out += fmt.Sprintf("  💨  [white]%.1f km/h[-]\n", forecast.Current.WindSpeed10m)
+		out += fmt.Sprintf("  🌡️  [white]%.1f%s[-]\n", forecast.Current.Temperature2m, tempLabel)
+		out += fmt.Sprintf("  💨  [white]%.1f %s[-]\n", forecast.Current.WindSpeed10m, windLabel)
 		out += fmt.Sprintf("  🌤️  [white]%s[-]\n\n", weather.WMOToText(forecast.Current.WeatherCode))
 
 		out += "  [teal::b]7-Day Forecast[-]\n"
@@ -307,7 +460,7 @@ func (a *App) fetchForecast(city weather.City) {
 			minT := forecast.Daily.Temperature2mMin[i]
 			maxT := forecast.Daily.Temperature2mMax[i]
 			cond := weather.WMOToText(forecast.Daily.WeatherCode[i])
-			out += fmt.Sprintf("  [yellow]%s[-]  %-20s [blue]▼ %.1f°C[-]  [red]▲ %.1f°C[-]\n", date, cond, minT, maxT)
+			out += fmt.Sprintf("  [yellow]%s[-]  %-20s [blue]▼ %.1f%s[-]  [red]▲ %.1f%s[-]\n", date, cond, minT, tempLabel, maxT, tempLabel)
 		}
 
 		a.MainView.SetText(out)
@@ -318,10 +471,10 @@ func (a *App) fetchForecast(city weather.City) {
 func (a *App) refreshFavorites() {
 	currentIndex := a.Sidebar.GetCurrentItem()
 	a.Sidebar.Clear()
-	for _, f := range a.Config.Favorites {
+	for i, f := range a.Config.Favorites {
 		// Show city label as main, local time as secondary
 		timeStr := f.LocalTime().Format("15:04 (MST)")
-		a.Sidebar.AddItem(" "+f.Label(), "   "+timeStr, 0, nil)
+		a.Sidebar.AddItem(" "+f.Label(), "     "+timeStr, rune('1'+i), nil)
 	}
 	if len(a.Config.Favorites) == 0 {
 		a.Sidebar.AddItem(" No Favorites", "   Press 'f' to add", 0, nil)
@@ -333,14 +486,8 @@ func (a *App) refreshFavorites() {
 }
 
 func (a *App) updateHeader() {
-	status := "Offline Mode / Default"
-	if a.CurrentCity != nil {
-		status = fmt.Sprintf("City: %s", a.CurrentCity.Label())
-	}
-
-	// App-wide sync time
 	sysTime := time.Now().Format("2006-01-02 15:04:05 MST")
-	a.Header.SetText(fmt.Sprintf(" %s | System Time: %s ", status, sysTime))
+	a.HeaderInfo.SetText(fmt.Sprintf("\n  [white::b]Weather TUI Dashboard[-]\n  [gray]System Time: %s[-]\n%s", sysTime, asciiArt))
 
 	// Also re-render the sidebar to keep favorite clocks ticking
 	a.refreshFavorites()

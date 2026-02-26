@@ -12,7 +12,9 @@ import (
 
 // Config represents the user's persistent application data.
 type Config struct {
-	Favorites []weather.City `json:"favorites"`
+	Favorites       []weather.City `json:"favorites"`
+	TemperatureUnit string         `json:"temperature_unit,omitempty"` // "celsius", "fahrenheit"
+	WindUnit        string         `json:"wind_unit,omitempty"`        // "kmh", "ms", "mph"
 }
 
 // GetConfigPath returns the absolute path to the configuration file (e.g. ~/.config/weather-tui/favorites.json).
@@ -50,6 +52,14 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Set defaults if empty
+	if cfg.TemperatureUnit == "" {
+		cfg.TemperatureUnit = "celsius"
+	}
+	if cfg.WindUnit == "" {
+		cfg.WindUnit = "kmh"
 	}
 
 	return &cfg, nil
