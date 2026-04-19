@@ -49,6 +49,14 @@ go test -coverprofile=coverage.out ./... && go tool cover -html=coverage.out
 
 ### CI
 
-Every push and pull request runs the `CI` workflow (lint + tests with race detector + coverage report uploaded as an artifact). Releases are gated on a successful test run, so broken builds cannot reach the Releases page.
+Every push and pull request runs the `CI` workflow (lint + `govulncheck` + tests with race detector + coverage report uploaded as an artifact). Releases are gated on a successful test run, so broken builds cannot reach the Releases page.
 
 Coverage totals are printed in the CI log (`go tool cover -func`) and the full `coverage.out` / `coverage.txt` files are attached to each run as a downloadable artifact.
+
+### Security posture
+
+- **No API keys**: Open-Meteo is used unauthenticated, so there are no secrets to rotate or leak.
+- **Vulnerability scanning**: `govulncheck` runs on every push / PR and fails the build when a reachable CVE is detected in the Go module graph.
+- **Automated dependency updates**: Dependabot opens weekly grouped PRs for Go modules and GitHub Actions.
+- **Strict HTTP client**: 10 s total timeout, `context.Context` cancellation, identifying `User-Agent`, and a 1 MiB response-body cap on every Open-Meteo call.
+- **Rate-limit friendly**: the search autocomplete debounces keystrokes (250 ms) and cancels in-flight requests when the user keeps typing, so one word turns into one request — not one per character.

@@ -2,8 +2,11 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -11,6 +14,16 @@ import (
 	"github.com/kubevoidcraft/weather-tui/internal/weather"
 	"github.com/rivo/tview"
 )
+
+// searchDebounce is how long we wait after the last keystroke before firing a
+// search request. It keeps autocomplete responsive while avoiding one HTTP
+// call per character, which would quickly trip Open-Meteo's rate limits.
+const searchDebounce = 250 * time.Millisecond
+
+// searchRequestTimeout bounds a single search request on top of the HTTP
+// client's own timeout. Chosen smaller so stale requests cancel quickly when
+// the user keeps typing.
+const searchRequestTimeout = 8 * time.Second
 
 // hourlyWindowHours is how many hours of hourly forecast we render in the
 // side panel. Twelve fits comfortably next to the current-weather block on a
@@ -43,6 +56,15 @@ type App struct {
 	SearchList    *tview.List
 	SearchResults []weather.City
 	SettingsForm  *tview.Form
+
+	// Search debounce / cancellation state. Accessed from multiple goroutines
+	// via searchMu: the tview event loop triggers debouncing on keystrokes,
+	// while a background goroutine eventually dispatches the HTTP call.
+	searchMu        sync.Mutex
+	searchTimer     *time.Timer        // pending debounce; nil once fired or cleared
+	searchCancel    context.CancelFunc // cancels the currently in-flight request
+	searchSeq       uint64             // monotonically increasing request id
+	searchLatestSeq uint64             // highest seq whose results were rendered
 }
 
 const asciiArt = `
@@ -258,12 +280,15 @@ func (a *App) setupUI() {
 	})
 
 	a.CmdInput.SetChangedFunc(func(text string) {
-		// Just expecting the query text directly now, no "s " prefix
-		if len(text) >= 3 {
-			go a.executeSearch(text)
-		} else {
+		// Just expecting the query text directly now, no "s " prefix.
+		// Queries shorter than 3 chars can't be sent to the geocoding API,
+		// so we cancel any pending/in-flight search and hide the list.
+		if len(text) < 3 {
+			a.cancelPendingSearch()
 			a.hideSearchList()
+			return
 		}
+		a.scheduleSearch(text)
 	})
 
 	a.CmdInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -443,6 +468,8 @@ func (a *App) hasItem(flex *tview.Flex, item tview.Primitive) bool {
 }
 
 func (a *App) hideCommandInput() {
+	// Make sure no debounced search fires after the bar disappears.
+	a.cancelPendingSearch()
 	a.hideSearchList()
 	a.MainFlex.RemoveItem(a.CmdInput)
 	a.cmdVisible = false
@@ -457,8 +484,85 @@ func (a *App) hideSearchList() {
 	}
 }
 
-func (a *App) executeSearch(query string) {
-	results, err := weather.SearchCities(query)
+// scheduleSearch debounces autocomplete requests. It cancels any in-flight
+// request and (re)arms a short timer; only the last keystroke in a rapid
+// burst results in an HTTP call. Safe to call from any goroutine.
+func (a *App) scheduleSearch(query string) {
+	a.searchMu.Lock()
+	defer a.searchMu.Unlock()
+
+	// Cancel any in-flight request so its response is discarded and the
+	// network resources are freed right away.
+	if a.searchCancel != nil {
+		a.searchCancel()
+		a.searchCancel = nil
+	}
+	if a.searchTimer != nil {
+		a.searchTimer.Stop()
+	}
+
+	// Allocate a request id while we still hold the lock so ordering is
+	// well-defined even if two keystrokes fire the timer back-to-back.
+	a.searchSeq++
+	seq := a.searchSeq
+
+	a.searchTimer = time.AfterFunc(searchDebounce, func() {
+		a.executeSearch(query, seq)
+	})
+}
+
+// cancelPendingSearch stops any armed debounce timer and aborts an in-flight
+// request. Used when the user clears the input or closes the command bar.
+func (a *App) cancelPendingSearch() {
+	a.searchMu.Lock()
+	defer a.searchMu.Unlock()
+	if a.searchTimer != nil {
+		a.searchTimer.Stop()
+		a.searchTimer = nil
+	}
+	if a.searchCancel != nil {
+		a.searchCancel()
+		a.searchCancel = nil
+	}
+}
+
+// executeSearch performs the actual geocoding call. seq is the monotonic id
+// assigned when the request was scheduled; stale responses (where a newer
+// request has already rendered) are dropped so results never appear out of
+// order.
+func (a *App) executeSearch(query string, seq uint64) {
+	ctx, cancel := context.WithTimeout(context.Background(), searchRequestTimeout)
+
+	a.searchMu.Lock()
+	// A newer keystroke may have superseded us between timer fire and here.
+	if seq != a.searchSeq {
+		a.searchMu.Unlock()
+		cancel()
+		return
+	}
+	a.searchCancel = cancel
+	a.searchMu.Unlock()
+
+	results, err := weather.SearchCities(ctx, query)
+
+	// Release the cancel slot; ignore errors from context we already cancelled.
+	a.searchMu.Lock()
+	if a.searchCancel != nil {
+		// Only clear if it's still our cancel; a newer request may have
+		// overwritten it, in which case leave the newer one in place.
+		// We can't compare func values, so we rely on seq ordering instead.
+		if seq == a.searchSeq {
+			a.searchCancel = nil
+		}
+	}
+	// Drop stale results and cancellations triggered by a newer keystroke.
+	if seq < a.searchLatestSeq || errors.Is(ctx.Err(), context.Canceled) {
+		a.searchMu.Unlock()
+		return
+	}
+	a.searchLatestSeq = seq
+	a.searchMu.Unlock()
+
 	a.App.QueueUpdateDraw(func() {
 		if err != nil {
 			a.SearchList.Clear()
@@ -493,7 +597,11 @@ func (a *App) executeSearch(query string) {
 }
 
 func (a *App) fetchForecast(city weather.City) {
-	forecast, err := weather.GetForecast(city.Lat, city.Lon, city.Timezone, a.Config.TemperatureUnit, a.Config.WindUnit)
+	// Give the forecast its own timeout on top of the HTTP client's ceiling so
+	// the fetch cannot block the UI's loading state indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	forecast, err := weather.GetForecast(ctx, city.Lat, city.Lon, city.Timezone, a.Config.TemperatureUnit, a.Config.WindUnit)
 	a.App.QueueUpdateDraw(func() {
 		if err != nil {
 			a.MainView.SetText(fmt.Sprintf("Error fetching forecast: %v", err))

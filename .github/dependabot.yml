@@ -1,0 +1,25 @@
+# Dependabot keeps our Go modules and GitHub Actions pinned versions fresh so
+# CVE-affected releases are picked up without manual bookkeeping. Updates are
+# grouped weekly to avoid PR noise; critical security advisories still open
+# individual PRs via GitHub's security-update flow.
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      go-deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      ci-actions:
+        patterns:
+          - "*"
