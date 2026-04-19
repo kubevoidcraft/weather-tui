@@ -57,7 +57,10 @@ func NewApp() *App {
 	headerFlex := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(headerInfo, 0, 1, false)
 
-	sidebar := tview.NewList().ShowSecondaryText(true).SetMainTextColor(tcell.ColorWhite).SetSecondaryTextColor(tcell.ColorSilver).SetSelectedBackgroundColor(tcell.ColorDarkCyan)
+	sidebar := tview.NewList().ShowSecondaryText(true).SetMainTextColor(tcell.ColorWhite).SetSecondaryTextColor(tcell.ColorSilver)
+	// Keep the selection highlight visible even when the sidebar is not focused,
+	// so users can always see which favorite is currently loaded.
+	sidebar.SetSelectedFocusOnly(false)
 
 	mainView := tview.NewTextView().SetDynamicColors(true).SetRegions(true).SetWordWrap(true)
 	mainView.SetBackgroundColor(bgColor)
@@ -90,6 +93,9 @@ func (a *App) setupUI() {
 	// Sidebar setup
 	a.Sidebar.SetTitle(" Favorites ").SetBorder(false)
 	a.refreshFavorites()
+	// Nothing is selected at startup - hide the selection highlight until the
+	// user activates a favorite (via hotkey, sidebar Enter or search match).
+	a.highlightFavorite(-1)
 
 	// Sidebar event handling
 	a.Sidebar.SetSelectedFunc(func(index int, _, _ string, _ rune) {
@@ -99,6 +105,7 @@ func (a *App) setupUI() {
 		// Set current city
 		city := a.Config.Favorites[index]
 		a.CurrentCity = &city
+		a.highlightFavorite(index)
 
 		a.MainView.SetText(fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", city.Label()))
 		go a.fetchForecast(city)
@@ -244,10 +251,16 @@ func (a *App) setupUI() {
 	})
 
 	a.CmdInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// When the user presses arrow/page keys from inside the search box and
+		// suggestions are visible, hand the key off to the SearchList instead
+		// of letting the InputField consume it. We first move focus, then
+		// manually invoke the list's input handler with the same event so the
+		// selection updates immediately (without waiting for the next keypress).
+		// The nil setFocus callback is safe because tview only uses it to
+		// request focus changes, which we have already performed above.
 		if event.Key() == tcell.KeyDown || event.Key() == tcell.KeyUp || event.Key() == tcell.KeyPgDn || event.Key() == tcell.KeyPgUp {
 			if a.hasItem(a.MainFlex, a.SearchList) {
 				a.App.SetFocus(a.SearchList)
-				// Pass the event to the list so it immediately moves
 				a.SearchList.InputHandler()(event, nil)
 				return nil
 			}
@@ -260,6 +273,10 @@ func (a *App) setupUI() {
 			city := a.SearchResults[index]
 			a.CurrentCity = &city
 			a.hideCommandInput()
+			// If the chosen city is already a favorite, highlight it in the
+			// sidebar. Otherwise clear any stale highlight from a previous
+			// selection so the sidebar does not falsely imply one is active.
+			a.highlightFavorite(a.favoriteIndex(city))
 			// We trigger forecast fetch here asynchronously
 			a.MainView.SetText(fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", city.Label()))
 			go a.fetchForecast(city)
@@ -271,7 +288,9 @@ func (a *App) setupUI() {
 
 	a.App.SetRoot(a.Pages, true).EnableMouse(true)
 
-	// Start a goroutine to update the time in the header every second
+	// Start a goroutine to update the time in the header every second.
+	// updateHeader also re-renders the sidebar, which in turn re-applies the
+	// current favorite highlight, so the UI remains consistent over time.
 	go func() {
 		for {
 			time.Sleep(1 * time.Second)
@@ -355,6 +374,10 @@ func (a *App) setupGlobalKeybindings() {
 			if idx < len(a.Config.Favorites) {
 				city := a.Config.Favorites[idx]
 				a.CurrentCity = &city
+				// Highlight the selected favorite in the sidebar and move focus
+				// there so the selection is visibly indicated to the user.
+				a.highlightFavorite(idx)
+				a.App.SetFocus(a.Sidebar)
 				a.MainView.SetText(fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", city.Label()))
 				go a.fetchForecast(city)
 			}
@@ -363,6 +386,39 @@ func (a *App) setupGlobalKeybindings() {
 
 		return event
 	})
+}
+
+// favoriteIndex returns the index of the given city in Config.Favorites, or -1
+// if the city is not currently saved as a favorite. Cities are matched by
+// coordinates so duplicate names in different locations are disambiguated.
+//
+// Exact float equality is intentional: favorites are persisted with the same
+// Lat/Lon values returned by Open-Meteo's geocoder, so as long as the geocoder
+// is deterministic for a given city the comparison holds. If we ever observe
+// drift, switch to a small epsilon tolerance here.
+func (a *App) favoriteIndex(city weather.City) int {
+	for i, fav := range a.Config.Favorites {
+		if fav.Lat == city.Lat && fav.Lon == city.Lon {
+			return i
+		}
+	}
+	return -1
+}
+
+// highlightFavorite visually marks the favorite at idx as the currently active
+// one. If idx is negative, any existing highlight is removed. The sidebar's
+// current item still gets moved (tview always has one) but the selected-row
+// background is only made visible when a real favorite is active.
+func (a *App) highlightFavorite(idx int) {
+	if idx < 0 || idx >= len(a.Config.Favorites) {
+		// Hide the selection bar by matching the default background color.
+		a.Sidebar.SetSelectedBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
+		a.Sidebar.SetSelectedTextColor(tcell.ColorWhite)
+		return
+	}
+	a.Sidebar.SetSelectedBackgroundColor(tcell.ColorDarkCyan)
+	a.Sidebar.SetSelectedTextColor(tcell.ColorWhite)
+	a.Sidebar.SetCurrentItem(idx)
 }
 
 func (a *App) hasItem(flex *tview.Flex, item tview.Primitive) bool {
@@ -467,9 +523,9 @@ func (a *App) fetchForecast(city weather.City) {
 	})
 }
 
-// refreshFavorites rebuilds the sidebar items from the Config.Favorites
+// refreshFavorites rebuilds the sidebar items from the Config.Favorites and
+// re-applies the highlight for the currently active city (if it is a favorite).
 func (a *App) refreshFavorites() {
-	currentIndex := a.Sidebar.GetCurrentItem()
 	a.Sidebar.Clear()
 	for i, f := range a.Config.Favorites {
 		// Show city label as main, local time as secondary
@@ -480,8 +536,13 @@ func (a *App) refreshFavorites() {
 		a.Sidebar.AddItem(" No Favorites", "   Press 'f' to add", 0, nil)
 	}
 
-	if currentIndex >= 0 && currentIndex < a.Sidebar.GetItemCount() {
-		a.Sidebar.SetCurrentItem(currentIndex)
+	// Re-apply the highlight based on the currently active city. This ensures
+	// that periodic redraws (for ticking clocks) or favorite list mutations
+	// (add/remove) keep the sidebar visually consistent with app state.
+	if a.CurrentCity != nil {
+		a.highlightFavorite(a.favoriteIndex(*a.CurrentCity))
+	} else {
+		a.highlightFavorite(-1)
 	}
 }
 
