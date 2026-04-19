@@ -1,10 +1,13 @@
 package weather
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withStubbedURL temporarily replaces a package-level URL variable for the
@@ -17,8 +20,12 @@ func withStubbedURL(target *string, replacement string, fn func()) {
 }
 
 func TestSearchCitiesRejectsShortQuery(t *testing.T) {
-	if _, err := SearchCities("ab"); err == nil {
-		t.Errorf("expected error for query shorter than 3 chars")
+	_, err := SearchCities(context.Background(), "ab")
+	if err == nil {
+		t.Fatalf("expected error for query shorter than 3 chars")
+	}
+	if !errors.Is(err, ErrQueryTooShort) {
+		t.Errorf("expected ErrQueryTooShort, got %v", err)
 	}
 }
 
@@ -35,7 +42,7 @@ func TestSearchCitiesParsesResults(t *testing.T) {
 	defer srv.Close()
 
 	withStubbedURL(&geomapAPIURL, srv.URL, func() {
-		cities, err := SearchCities("paris")
+		cities, err := SearchCities(context.Background(), "paris")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -55,7 +62,7 @@ func TestSearchCitiesSurfacesHTTPError(t *testing.T) {
 	defer srv.Close()
 
 	withStubbedURL(&geomapAPIURL, srv.URL, func() {
-		if _, err := SearchCities("paris"); err == nil {
+		if _, err := SearchCities(context.Background(), "paris"); err == nil {
 			t.Errorf("expected error on non-200 response")
 		}
 	})
@@ -68,8 +75,51 @@ func TestSearchCitiesRejectsMalformedJSON(t *testing.T) {
 	defer srv.Close()
 
 	withStubbedURL(&geomapAPIURL, srv.URL, func() {
-		if _, err := SearchCities("paris"); err == nil {
+		if _, err := SearchCities(context.Background(), "paris"); err == nil {
 			t.Errorf("expected error on malformed json")
+		}
+	})
+}
+
+func TestSearchCitiesSendsUserAgent(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	withStubbedURL(&geomapAPIURL, srv.URL, func() {
+		if _, err := SearchCities(context.Background(), "paris"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	if !strings.Contains(gotUA, "weather-tui") {
+		t.Errorf("expected User-Agent to identify weather-tui, got %q", gotUA)
+	}
+}
+
+func TestSearchCitiesRespectsContextCancellation(t *testing.T) {
+	// Handler deliberately blocks until the client disconnects so we can
+	// assert that cancelling the context aborts the request promptly.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	withStubbedURL(&geomapAPIURL, srv.URL, func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+		start := time.Now()
+		_, err := SearchCities(ctx, "paris")
+		if err == nil {
+			t.Fatalf("expected cancellation error")
+		}
+		if time.Since(start) > time.Second {
+			t.Errorf("cancellation did not interrupt request promptly (took %s)", time.Since(start))
 		}
 	})
 }
@@ -101,7 +151,7 @@ func TestGetForecastRequestsExpectedFields(t *testing.T) {
 	defer srv.Close()
 
 	withStubbedURL(&weatherAPIURL, srv.URL, func() {
-		fc, err := GetForecast(48.85, 2.35, "Europe/Paris", "celsius", "kmh")
+		fc, err := GetForecast(context.Background(), 48.85, 2.35, "Europe/Paris", "celsius", "kmh")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -145,7 +195,7 @@ func TestGetForecastDefaultsTimezoneToAuto(t *testing.T) {
 	defer srv.Close()
 
 	withStubbedURL(&weatherAPIURL, srv.URL, func() {
-		if _, err := GetForecast(0, 0, "", "celsius", "kmh"); err != nil {
+		if _, err := GetForecast(context.Background(), 0, 0, "", "celsius", "kmh"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !strings.Contains(captured, "timezone=auto") {
@@ -161,8 +211,33 @@ func TestGetForecastSurfacesHTTPError(t *testing.T) {
 	defer srv.Close()
 
 	withStubbedURL(&weatherAPIURL, srv.URL, func() {
-		if _, err := GetForecast(0, 0, "UTC", "celsius", "kmh"); err == nil {
+		if _, err := GetForecast(context.Background(), 0, 0, "UTC", "celsius", "kmh"); err == nil {
 			t.Errorf("expected error for 500 response")
+		}
+	})
+}
+
+// TestGetForecastCapsResponseBody ensures an oversized payload is rejected at
+// decode time instead of being fully consumed into memory. We emit a valid
+// JSON prefix followed by padding that pushes total length past the 1 MiB cap;
+// LimitReader truncates mid-document, which the decoder then reports.
+func TestGetForecastCapsResponseBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Write a minimal valid-looking start, then flood with whitespace
+		// past the body cap so the decoder runs out of input before the
+		// closing brace.
+		_, _ = w.Write([]byte(`{"latitude":0,"longitude":0,"timezone":"UTC","padding":"`))
+		chunk := strings.Repeat("x", 64*1024)
+		// 1 MiB cap / 64 KiB = 16 chunks; write 20 to be safely over.
+		for range 20 {
+			_, _ = w.Write([]byte(chunk))
+		}
+	}))
+	defer srv.Close()
+
+	withStubbedURL(&weatherAPIURL, srv.URL, func() {
+		if _, err := GetForecast(context.Background(), 0, 0, "UTC", "celsius", "kmh"); err == nil {
+			t.Errorf("expected error when response exceeds size cap")
 		}
 	})
 }
