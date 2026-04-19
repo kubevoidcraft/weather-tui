@@ -1,18 +1,21 @@
-# golangci-lint config
+# golangci-lint config (v2 schema - see https://golangci-lint.run/docs/configuration/file/)
 version: "2"
+
 run:
   timeout: 5m
   modules-download-mode: readonly
 
 linters:
-  disable-all: true
+  # Disable every linter, then enable only the set we want. This mirrors the
+  # old v1 `disable-all: true` + `enable:` pattern using v2 keys.
+  default: none
   enable:
     # Security & Error Handling
     - gosec          # Inspects source code for security problems
     - errcheck       # Checks for unchecked errors
     - govet          # Reports suspicious constructs (shadowing, etc.)
     - revive         # Modern replacement for golint
-    
+
     # Performance & Cleanliness
     - gocyclo        # Computes functions complexity
     - staticcheck    # Advanced static analysis
@@ -21,45 +24,49 @@ linters:
     - bodyclose      # Checks whether HTTP response bodies are closed
     - prealloc       # Finds slice declarations that could potentially be preallocated
 
-linters-settings:
-  gosec:
-    # Specifically check for weak crypto and file permissions
-    severity: medium
-    confidence: high
-  
-  revive:
+  settings:
+    gosec:
+      # Specifically check for weak crypto and file permissions.
+      severity: medium
+      confidence: high
+
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: blank-imports
+          disabled: true
+        - name: var-naming
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+
+  exclusions:
+    # Do not apply golangci-lint's built-in "default" excludes - we want full
+    # coverage, minus only the rules declared below. Leaving `presets` unset
+    # is the v2 equivalent of v1's `exclude-use-default: false`.
     rules:
-      - name: exported
-        disabled: true
-      - name: package-comments
-        disabled: true
-      - name: blank-imports
-        disabled: true
-      - name: var-naming
-        disabled: true
-      - name: unused-parameter
-        disabled: true
+      - linters: [gosec]
+        text: "Log injection via taint analysis"
+      - linters: [gosec]
+        text: "SQL string formatting"
+      - linters: [gosec]
+        text: "integer overflow conversion"
+      - linters: [revive]
+        text: "should have a package comment"
+      - linters: [revive]
+        text: "exported (.*) should have comment or be unexported"
+      - linters: [revive]
+        text: "blank-imports:"
+      - linters: [revive]
+        text: "var-naming:"
+      - linters: [revive]
+        text: "unused-parameter:"
+      - linters: [revive]
+        text: "comment on exported function"
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    - linters: [gosec]
-      text: "Log injection via taint analysis"
-    - linters: [gosec]
-      text: "SQL string formatting"
-    - linters: [gosec]
-      text: "integer overflow conversion"
-    - linters: [revive]
-      text: "should have a package comment"
-    - linters: [revive]
-      text: "exported (.*) should have comment or be unexported"
-    - linters: [revive]
-      text: "blank-imports:"
-    - linters: [revive]
-      text: "var-naming:"
-    - linters: [revive]
-      text: "unused-parameter:"
-    - linters: [revive]
-      text: "comment on exported function"
