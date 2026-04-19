@@ -29,9 +29,14 @@ jobs:
         run: go mod download
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          # Pin a recent golangci-lint v2 release built with Go 1.25+. Older
+          # releases (e.g. 1.64.x, which is what "latest" resolves to on some
+          # action versions) reject go 1.25 in go.mod with a "lower than
+          # targeted Go version" error. The config file at .golangci.yml uses
+          # the v2 schema, so any v2 binary will load it correctly.
+          version: v2.11.4
           args: --timeout=5m
 
       - name: Run tests with coverage
