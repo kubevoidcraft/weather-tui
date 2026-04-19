@@ -6,9 +6,36 @@ on:
       - main
 
 jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Run tests
+        run: go test -race ./...
+
   release:
     name: Auto Tag and Release
     runs-on: ubuntu-latest
+    # Do not release if CI checks fail - prevents broken binaries from
+    # reaching the Releases page.
+    needs: test
     permissions:
       contents: write
 

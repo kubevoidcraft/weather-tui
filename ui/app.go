@@ -3,6 +3,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -10,6 +11,21 @@ import (
 	"github.com/kubevoidcraft/weather-tui/internal/weather"
 	"github.com/rivo/tview"
 )
+
+// hourlyWindowHours is how many hours of hourly forecast we render in the
+// side panel. Twelve fits comfortably next to the current-weather block on a
+// standard terminal and still shows a meaningful trend.
+const hourlyWindowHours = 12
+
+// sideBySideMinWidth is the minimum MainView inner width at which the hourly
+// panel is rendered next to the current weather block. Below this threshold,
+// the hourly panel is stacked underneath instead so nothing gets clipped.
+const sideBySideMinWidth = 80
+
+// currentWeatherColumnWidth is the fixed render width of the left (current
+// weather) column when the layout is side-by-side. It is wide enough for a
+// typical city label while leaving room for the hourly panel.
+const currentWeatherColumnWidth = 32
 
 // App represents the main application state and UI components.
 type App struct {
@@ -410,15 +426,11 @@ func (a *App) favoriteIndex(city weather.City) int {
 // current item still gets moved (tview always has one) but the selected-row
 // background is only made visible when a real favorite is active.
 func (a *App) highlightFavorite(idx int) {
-	if idx < 0 || idx >= len(a.Config.Favorites) {
-		// Hide the selection bar by matching the default background color.
-		a.Sidebar.SetSelectedBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
-		a.Sidebar.SetSelectedTextColor(tcell.ColorWhite)
-		return
+	active := idx >= 0 && idx < len(a.Config.Favorites)
+	a.applyHighlightColor(active)
+	if active {
+		a.Sidebar.SetCurrentItem(idx)
 	}
-	a.Sidebar.SetSelectedBackgroundColor(tcell.ColorDarkCyan)
-	a.Sidebar.SetSelectedTextColor(tcell.ColorWhite)
-	a.Sidebar.SetCurrentItem(idx)
 }
 
 func (a *App) hasItem(flex *tview.Flex, item tview.Primitive) bool {
@@ -490,42 +502,303 @@ func (a *App) fetchForecast(city weather.City) {
 
 		a.updateHeader()
 
-		// Determine unit labels based on config
-		tempLabel := "°C"
-		if a.Config.TemperatureUnit == "fahrenheit" {
-			tempLabel = "°F"
-		}
+		tempLabel, windLabel := a.unitLabels()
 
-		windLabel := "km/h"
-		switch a.Config.WindUnit {
-		case "ms":
-			windLabel = "m/s"
-		case "mph":
-			windLabel = "mph"
-		}
-
-		// Format output
+		// Header line identifying the city being shown.
 		out := fmt.Sprintf("\n  [white::b]📍 %s[-]\n  [gray]Timezone: %s[-]\n\n", city.Label(), city.Timezone)
-		out += "  [teal::b]Current Weather[-]\n"
-		out += fmt.Sprintf("  🌡️  [white]%.1f%s[-]\n", forecast.Current.Temperature2m, tempLabel)
-		out += fmt.Sprintf("  💨  [white]%.1f %s[-]\n", forecast.Current.WindSpeed10m, windLabel)
-		out += fmt.Sprintf("  🌤️  [white]%s[-]\n\n", weather.WMOToText(forecast.Current.WeatherCode))
 
-		out += "  [teal::b]7-Day Forecast[-]\n"
-		for i, date := range forecast.Daily.Time {
-			minT := forecast.Daily.Temperature2mMin[i]
-			maxT := forecast.Daily.Temperature2mMax[i]
-			cond := weather.WMOToText(forecast.Daily.WeatherCode[i])
-			out += fmt.Sprintf("  [yellow]%s[-]  %-20s [blue]▼ %.1f%s[-]  [red]▲ %.1f%s[-]\n", date, cond, minT, tempLabel, maxT, tempLabel)
-		}
+		// The current weather and hourly forecast are rendered as two columns
+		// when there is enough horizontal space; otherwise they stack.
+		currentLines := renderCurrentWeather(forecast, tempLabel, windLabel)
+		hourlyLines := renderHourlyPanel(forecast, city, tempLabel, windLabel)
+
+		out += a.joinPanels(currentLines, hourlyLines)
+		out += "\n"
+
+		out += renderDailyForecast(forecast, tempLabel, windLabel)
 
 		a.MainView.SetText(out)
 	})
 }
 
+// renderDailyForecast formats the 7-day outlook as a titled table. A header
+// row with column names sits above the data rows; both use the same fixed
+// column widths so values line up cleanly under their labels. Widths are
+// chosen to fit typical values plus a small margin.
+func renderDailyForecast(forecast *weather.Forecast, tempLabel, windLabel string) string {
+	const (
+		dateWidth = 10 // "2006-01-02"
+		condWidth = 20 // Weather description
+		tempWidth = 10 // "▼ 12.3°C " with room for the arrow + decimals + unit
+		windWidth = 14 // "💨 12.3 km/h" - emoji counts as 2 cols
+	)
+
+	var b strings.Builder
+	b.WriteString("  [teal::b]7-Day Forecast[-]\n")
+	// Header row: column titles in a muted color so they are clearly distinct
+	// from data rows. padVisible handles wide characters in titles (none here,
+	// but using it keeps the approach uniform with the rest of the renderer).
+	b.WriteString("  ")
+	b.WriteString(padVisible("[gray::b]Date[-]", dateWidth))
+	b.WriteString("  ")
+	b.WriteString(padVisible("[gray::b]Condition[-]", condWidth))
+	b.WriteString(padVisible("[gray::b]Min[-]", tempWidth))
+	b.WriteString(padVisible("[gray::b]Max[-]", tempWidth))
+	b.WriteString(padVisible("[gray::b]Wind[-]", windWidth))
+	b.WriteByte('\n')
+
+	for i, date := range forecast.Daily.Time {
+		minT := forecast.Daily.Temperature2mMin[i]
+		maxT := forecast.Daily.Temperature2mMax[i]
+		cond := weather.WMOToText(forecast.Daily.WeatherCode[i])
+		wind := dailyWind(forecast.Daily.WindSpeed10mMax, i)
+
+		b.WriteString("  ")
+		b.WriteString(padVisible("[yellow]"+date+"[-]", dateWidth))
+		b.WriteString("  ")
+		b.WriteString(padVisible(cond, condWidth))
+		b.WriteString(padVisible(fmt.Sprintf("[blue]▼ %.1f%s[-]", minT, tempLabel), tempWidth))
+		b.WriteString(padVisible(fmt.Sprintf("[red]▲ %.1f%s[-]", maxT, tempLabel), tempWidth))
+		if wind >= 0 {
+			fmt.Fprintf(&b, "[white]💨 %.1f %s[-]", wind, windLabel)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// dailyWind safely returns the wind speed for day i, or -1 if the API did not
+// include wind data (older response shapes or schema changes). Callers skip
+// the wind column entirely on a negative return.
+func dailyWind(winds []float64, i int) float64 {
+	if i < 0 || i >= len(winds) {
+		return -1
+	}
+	return winds[i]
+}
+
+// unitLabels returns display labels for temperature and wind speed units based
+// on the currently configured preferences.
+func (a *App) unitLabels() (tempLabel, windLabel string) {
+	tempLabel = "°C"
+	if a.Config.TemperatureUnit == "fahrenheit" {
+		tempLabel = "°F"
+	}
+
+	windLabel = "km/h"
+	switch a.Config.WindUnit {
+	case "ms":
+		windLabel = "m/s"
+	case "mph":
+		windLabel = "mph"
+	}
+	return tempLabel, windLabel
+}
+
+// renderCurrentWeather builds the "Current Weather" block as a slice of lines
+// (one string per row). Returning lines rather than a pre-joined string keeps
+// zipping with the hourly panel straightforward.
+func renderCurrentWeather(forecast *weather.Forecast, tempLabel, windLabel string) []string {
+	return []string{
+		"  [teal::b]Current Weather[-]",
+		fmt.Sprintf("  🌡️  [white]%.1f%s[-]", forecast.Current.Temperature2m, tempLabel),
+		fmt.Sprintf("  💨  [white]%.1f %s[-]", forecast.Current.WindSpeed10m, windLabel),
+		fmt.Sprintf("  🌤️  [white]%s[-]", weather.WMOToText(forecast.Current.WeatherCode)),
+	}
+}
+
+// renderHourlyPanel produces the "Next N hours" block: a header row with hour
+// labels followed by three sparkline rows (temperature, wind, precipitation
+// probability). Each sparkline is annotated with a "first -> max -> last"
+// summary so absolute values remain visible even though the block characters
+// only show relative shape.
+func renderHourlyPanel(forecast *weather.Forecast, city weather.City, tempLabel, windLabel string) []string {
+	start := hourlyStartIndex(forecast.Hourly.Time, city)
+	if start < 0 || start >= len(forecast.Hourly.Time) {
+		return nil
+	}
+
+	end := start + hourlyWindowHours
+	if end > len(forecast.Hourly.Time) {
+		end = len(forecast.Hourly.Time)
+	}
+
+	times := forecast.Hourly.Time[start:end]
+	temps := forecast.Hourly.Temperature2m[start:end]
+	winds := forecast.Hourly.WindSpeed10m[start:end]
+	rains := forecast.Hourly.PrecipitationProbability[start:end]
+
+	// Header row: hour-of-day (HH) per column, separated by a single space so
+	// it visually aligns one block character under each pair of digits.
+	hourLabels := make([]string, 0, len(times))
+	for _, t := range times {
+		hourLabels = append(hourLabels, hourOfDay(t))
+	}
+
+	// Each hour occupies a fixed 3-column slot so the header labels and the
+	// block characters below share the same column grid:
+	//   header : "HH HH HH ..." (2 digits + 1 space per hour)
+	//   data   : "B  B  B  ..." (1 block + 2 spaces per hour)
+	// This way block i always sits directly under the first digit of hour
+	// label i. labelPrefix and dataPrefix are sized so the two grids start
+	// at the same terminal column regardless of emoji width differences.
+	const labelPrefix = "  [gray]Time[-]  " // "  Time  " = 8 visible cols
+	tempPrefix := padVisible("  🌡️  ", 8)
+	windPrefix := padVisible("  💨  ", 8)
+	rainPrefix := padVisible("  🌧️  ", 8)
+
+	return []string{
+		fmt.Sprintf("  [teal::b]Next %d hours[-]", len(times)),
+		labelPrefix + strings.Join(hourLabels, " "),
+		tempPrefix + spaceOut3(sparkline(temps)) + "  " + summarize(temps, tempLabel, "%.0f"),
+		windPrefix + spaceOut3(sparkline(winds)) + "  " + summarize(winds, windLabel, "%.0f"),
+		rainPrefix + spaceOut3(shaded(rains)) + "  " + summarize(rains, "%%", "%.0f"),
+	}
+}
+
+// spaceOut3 renders a data row so each block sits in a 3-column slot,
+// matching the "HH " grid of the header row. Blocks are separated by two
+// spaces and the row has no trailing padding.
+func spaceOut3(s string) string {
+	runes := []rune(s)
+	if len(runes) == 0 {
+		return ""
+	}
+	parts := make([]string, len(runes))
+	for i, r := range runes {
+		parts[i] = string(r)
+	}
+	return strings.Join(parts, "  ")
+}
+
+
+
+// hourlyStartIndex returns the index of the first entry in the API's hourly
+// Time slice that is at or after "now" in the city's local timezone. If the
+// API didn't return enough data, it returns -1.
+//
+// Open-Meteo returns hourly data starting at 00:00 local time of the current
+// day (when timezone is set), so we just need to find the first entry that is
+// not in the past.
+func hourlyStartIndex(times []string, city weather.City) int {
+	if len(times) == 0 {
+		return -1
+	}
+	now := city.LocalTime()
+	// Trim to the beginning of the current hour to avoid skipping "this hour".
+	now = now.Truncate(time.Hour)
+
+	loc := now.Location()
+	for i, raw := range times {
+		// Open-Meteo hourly timestamps are of the form "2006-01-02T15:04" in
+		// local time when the timezone query parameter was supplied.
+		t, err := time.ParseInLocation("2006-01-02T15:04", raw, loc)
+		if err != nil {
+			continue
+		}
+		if !t.Before(now) {
+			return i
+		}
+	}
+	return -1
+}
+
+// hourOfDay extracts the two-digit hour component from an Open-Meteo hourly
+// timestamp. If the string is malformed we fall back to "??" so the row still
+// lines up with the sparkline cells.
+func hourOfDay(raw string) string {
+	if len(raw) < 13 {
+		return "??"
+	}
+	return raw[11:13]
+}
+
+// summarize returns a "first -> max -> last unit" string for a numeric series.
+// The %% case is handled by passing unit="%%" which fmt will render as "%".
+func summarize(values []float64, unit, numFmt string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	first, last := values[0], values[len(values)-1]
+	maxV := values[0]
+	for _, v := range values[1:] {
+		if v > maxV {
+			maxV = v
+		}
+	}
+	format := fmt.Sprintf("[gray]%s → %s → %s %s[-]", numFmt, numFmt, numFmt, unit)
+	return fmt.Sprintf(format, first, maxV, last)
+}
+
+// joinPanels combines the current-weather and hourly panels into a single
+// multi-line string. It uses a side-by-side layout when MainView is wide
+// enough, and falls back to stacking (current weather, blank line, hourly)
+// on narrow terminals so nothing gets visually clipped.
+func (a *App) joinPanels(left, right []string) string {
+	if len(right) == 0 {
+		return strings.Join(left, "\n") + "\n"
+	}
+
+	_, _, width, _ := a.MainView.GetInnerRect()
+	if width > 0 && width < sideBySideMinWidth {
+		var b strings.Builder
+		for _, line := range left {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+		for _, line := range right {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		return b.String()
+	}
+
+	rows := len(left)
+	if len(right) > rows {
+		rows = len(right)
+	}
+	var b strings.Builder
+	for i := 0; i < rows; i++ {
+		var l string
+		if i < len(left) {
+			l = left[i]
+		}
+		// Pad the left column to a fixed visible width so the right column
+		// starts at a predictable position regardless of row content.
+		b.WriteString(padVisible(l, currentWeatherColumnWidth))
+		if i < len(right) {
+			b.WriteString(right[i])
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// padVisible right-pads s with spaces until its visible width (ignoring tview
+// style tags) reaches width. If s is already wider, it is returned unchanged.
+// This keeps column alignment correct even when lines contain color markup.
+func padVisible(s string, width int) string {
+	visible := tview.TaggedStringWidth(s)
+	if visible >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-visible)
+}
+
 // refreshFavorites rebuilds the sidebar items from the Config.Favorites and
 // re-applies the highlight for the currently active city (if it is a favorite).
+//
+// The cursor position is preserved so periodic redraws (driven by the clock
+// ticker) do not snap the user back to the active favorite while they are
+// navigating with arrow keys. The "active favorite" is conveyed purely via
+// the selected-background color, which is bound to the list's current item;
+// to keep that marker tied to the city being viewed rather than where the
+// user's cursor happens to sit, we re-point the cursor at the active favorite
+// only when the user is not currently focused on the sidebar.
 func (a *App) refreshFavorites() {
+	prevIndex := a.Sidebar.GetCurrentItem()
+
 	a.Sidebar.Clear()
 	for i, f := range a.Config.Favorites {
 		// Show city label as main, local time as secondary
@@ -536,14 +809,36 @@ func (a *App) refreshFavorites() {
 		a.Sidebar.AddItem(" No Favorites", "   Press 'f' to add", 0, nil)
 	}
 
-	// Re-apply the highlight based on the currently active city. This ensures
-	// that periodic redraws (for ticking clocks) or favorite list mutations
-	// (add/remove) keep the sidebar visually consistent with app state.
+	activeIdx := -1
 	if a.CurrentCity != nil {
-		a.highlightFavorite(a.favoriteIndex(*a.CurrentCity))
-	} else {
-		a.highlightFavorite(-1)
+		activeIdx = a.favoriteIndex(*a.CurrentCity)
 	}
+
+	// Keep the selection-bar color in sync with whether any favorite is active,
+	// but choose the cursor position based on focus: if the user is navigating
+	// the sidebar, preserve their cursor; otherwise snap the cursor (and thus
+	// the visible highlight) to the active favorite.
+	if a.App.GetFocus() == a.Sidebar {
+		a.applyHighlightColor(activeIdx >= 0)
+		if prevIndex >= 0 && prevIndex < a.Sidebar.GetItemCount() {
+			a.Sidebar.SetCurrentItem(prevIndex)
+		}
+	} else {
+		a.highlightFavorite(activeIdx)
+	}
+}
+
+// applyHighlightColor toggles the sidebar's selected-row colors so the
+// selection bar is only visible when a favorite is actively loaded. This is
+// the color half of highlightFavorite, without moving the cursor.
+func (a *App) applyHighlightColor(active bool) {
+	if !active {
+		a.Sidebar.SetSelectedBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
+		a.Sidebar.SetSelectedTextColor(tcell.ColorWhite)
+		return
+	}
+	a.Sidebar.SetSelectedBackgroundColor(tcell.ColorDarkCyan)
+	a.Sidebar.SetSelectedTextColor(tcell.ColorWhite)
 }
 
 func (a *App) updateHeader() {

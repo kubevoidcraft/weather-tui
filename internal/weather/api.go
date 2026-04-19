@@ -8,11 +8,14 @@ import (
 	"time"
 )
 
-const (
+// Package-level variables (not consts) so that tests can point them at an
+// httptest server. Production code never mutates these at runtime.
+var (
 	geomapAPIURL  = "https://geocoding-api.open-meteo.com/v1/search"
 	weatherAPIURL = "https://api.open-meteo.com/v1/forecast"
-	clientTimeout = 10 * time.Second
 )
+
+const clientTimeout = 10 * time.Second
 
 // SearchResult represents the top-level JSON response from the Open-Meteo Geocoding API.
 type SearchResult struct {
@@ -25,6 +28,7 @@ type Forecast struct {
 	Longitude float64        `json:"longitude"`
 	Timezone  string         `json:"timezone"`
 	Current   CurrentWeather `json:"current"`
+	Hourly    HourlyWeather  `json:"hourly"`
 	Daily     DailyWeather   `json:"daily"`
 }
 
@@ -36,12 +40,24 @@ type CurrentWeather struct {
 	WeatherCode   int     `json:"weather_code"`
 }
 
+// HourlyWeather parses the hourly forecast arrays used to drive the 12-hour
+// outlook panel. All slices share the same length and are index-aligned with
+// Time. Open-Meteo returns values starting at 00:00 local time of the current
+// day, so callers are expected to slice the relevant window themselves.
+type HourlyWeather struct {
+	Time                     []string  `json:"time"`
+	Temperature2m            []float64 `json:"temperature_2m"`
+	WindSpeed10m             []float64 `json:"wind_speed_10m"`
+	PrecipitationProbability []float64 `json:"precipitation_probability"`
+}
+
 // DailyWeather parses the 7-day forecast data.
 type DailyWeather struct {
 	Time             []string  `json:"time"`
 	WeatherCode      []int     `json:"weather_code"`
 	Temperature2mMax []float64 `json:"temperature_2m_max"`
 	Temperature2mMin []float64 `json:"temperature_2m_min"`
+	WindSpeed10mMax  []float64 `json:"wind_speed_10m_max"`
 }
 
 // SearchCities calls the Open-Meteo Geocoding API to find cities matching the query.
@@ -83,7 +99,7 @@ func GetForecast(lat, lon float64, timezone, tempUnit, windUnit string) (*Foreca
 	}
 
 	reqURL := fmt.Sprintf(
-		"%s?latitude=%f&longitude=%f&current=temperature_2m,wind_speed_10m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=%s&temperature_unit=%s&wind_speed_unit=%s",
+		"%s?latitude=%f&longitude=%f&current=temperature_2m,wind_speed_10m,weather_code&hourly=temperature_2m,wind_speed_10m,precipitation_probability&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max&timezone=%s&temperature_unit=%s&wind_speed_unit=%s",
 		weatherAPIURL, lat, lon, url.QueryEscape(timezone), url.QueryEscape(tempUnit), url.QueryEscape(windUnit),
 	)
 
