@@ -43,10 +43,17 @@ jobs:
         # Scans the module graph for known Go vulnerabilities (CVEs) and
         # fails the job if any affect reachable code. Runs on every push
         # and PR so regressions in transitive deps are caught immediately.
+        #
+        # repo-checkout is disabled because the action otherwise runs
+        # actions/checkout a second time, which re-applies the Authorization
+        # header and makes GitHub reject the git fetch with HTTP 400
+        # ("Duplicate header: Authorization"). We already checked the code
+        # out above, so the second clone is redundant anyway.
         uses: golang/govulncheck-action@v1
         with:
-          go-version-input: '1.25'
+          go-version-file: go.mod
           check-latest: true
+          repo-checkout: false
 
       - name: Run tests with coverage
         run: |
