@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  # Reused by release.yml so a tag is released only after the exact same
+  # checks pass on it. Keep this file the single source of truth for checks.
+  workflow_call:
+
+# Deny everything by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  # On PRs, a new push cancels the now-stale run. On main and when called
+  # from release.yml, every run completes.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check go.mod / go.sum are tidy
+        run: go mod tidy -diff
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          # Pinned: golangci-lint must be built with a Go version >= the one
+          # in go.mod, or it refuses to lint. Bump together with go.mod.
+          version: v2.15.0
+          args: --timeout=5m
+
+  workflows:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run actionlint
+        # Catches syntax errors, bad expressions and shell bugs in workflows.
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Run zizmor
+        # Security audit of the workflows (unpinned actions, credential
+        # persistence, template injection, excessive permissions, ...).
+        uses: zizmorcore/zizmor-action@1b4550e929643b8b26a62303c6bd64814271a4f1 # v0.9.2
+        with:
+          version: 1.33.1
+          # Fail the job on findings instead of uploading SARIF, which would
+          # need security-events: write.
+          advanced-security: false
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run govulncheck
+        # Fails the job if a known vulnerability affects reachable code.
+        #
+        # repo-checkout is disabled because the action otherwise runs
+        # actions/checkout a second time, which re-applies the Authorization
+        # header and makes GitHub reject the git fetch with HTTP 400
+        # ("Duplicate header: Authorization").
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          repo-checkout: false
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # We ship macOS binaries and tcell has platform-specific terminal
+        # code, so test on both.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests with coverage
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: |
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out | tee coverage.txt
+          {
+            echo "### Coverage (${RUNNER_LABEL})"
+            echo
+            echo "Total: $(tail -1 coverage.txt | awk '{print $NF}')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage.txt
+          retention-days: 30
+
+  build:
+    name: Build release targets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          # This job also runs inside release.yml; never build release
+          # artifacts from a cache that a PR run could have populated.
+          cache: false
+
+      - name: GoReleaser snapshot
+        # Builds every release target and validates .goreleaser.yaml without
+        # publishing, so a broken release config fails here, not at tag time.
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.20.3
+          args: release --snapshot --clean

@@ -1,0 +1,42 @@
+# GoReleaser config (v2 schema - see https://goreleaser.com/customization/).
+# Run by .github/workflows/release.yml on `v*` tag pushes, and in snapshot
+# mode by ci.yml on every push/PR so a broken config fails before tagging.
+version: 2
+
+project_name: weather-tui
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      # Strip local filesystem paths from the binary.
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .CommitDate }}
+    # Use the commit time rather than "now" so rebuilding a tag yields
+    # byte-identical binaries.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  # Ship bare binaries under the same names the hand-rolled workflow used
+  # (weather-tui-darwin-arm64, ...) so existing download links keep working.
+  - formats: [binary]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^style"
+      - "^test"
+      - "^chore\\(deps\\)"
+
+release:
+  # Tags like v1.0.0-rc.1 are published as pre-releases.
+  prerelease: auto
