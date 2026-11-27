@@ -80,11 +80,10 @@ const asciiArt = `
 
 // NewApp creates and initializes a new App instance with all UI components.
 func NewApp() *App {
-	cfg, err := config.Load()
-	if err != nil {
-		// Log or handle, for now we will just start with empty config if it totally fails
-		cfg = &config.Config{}
-	}
+	// LoadOrRecover always returns a usable config. A malformed file is moved
+	// aside rather than overwritten by the next save; the error is shown in
+	// the main view below so the user knows what happened.
+	cfg, cfgErr := config.LoadOrRecover()
 
 	// Material Design Theme Colors
 	bgColor := tview.Styles.PrimitiveBackgroundColor
@@ -124,7 +123,16 @@ func NewApp() *App {
 		SettingsForm: settingsForm,
 	}
 	a.setupUI()
+	if cfgErr != nil {
+		a.MainView.SetText(configWarning(cfgErr))
+	}
 	return a
+}
+
+// configWarning formats a startup notice for a config that could not be
+// loaded. The error text includes a file path and is escaped for display.
+func configWarning(err error) string {
+	return "\n  [yellow::b]Could not load your saved settings[-]\n  " + tview.Escape(err.Error()) + "\n"
 }
 
 func (a *App) setupUI() {

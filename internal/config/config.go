@@ -3,6 +3,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,10 @@ type Config struct {
 	TemperatureUnit string         `json:"temperature_unit,omitempty"` // "celsius", "fahrenheit"
 	WindUnit        string         `json:"wind_unit,omitempty"`        // "kmh", "ms", "mph"
 }
+
+// ErrMalformedConfig is returned by Load when the config file exists but is
+// not valid JSON for Config.
+var ErrMalformedConfig = errors.New("config file is malformed")
 
 // GetConfigPath returns the absolute path to the configuration file (e.g. ~/.config/weather-tui/favorites.json).
 func GetConfigPath() (string, error) {
@@ -55,11 +60,39 @@ func Load() (*Config, error) {
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrMalformedConfig, err)
 	}
 	cfg.applyDefaults()
 
 	return &cfg, nil
+}
+
+// LoadOrRecover is Load for application startup: it always returns a usable
+// config with unit defaults applied. If the file exists but is malformed, it
+// is renamed to "<path>.corrupt" (replacing an older one) so that the next
+// Save cannot silently destroy the user's favorites, and the returned error
+// says where it went. Callers should show the error and keep running.
+func LoadOrRecover() (*Config, error) {
+	cfg, err := Load()
+	if err == nil {
+		return cfg, nil
+	}
+
+	fallback := &Config{Favorites: []weather.City{}}
+	fallback.applyDefaults()
+	if !errors.Is(err, ErrMalformedConfig) {
+		return fallback, err
+	}
+
+	path, pathErr := GetConfigPath()
+	if pathErr != nil {
+		return fallback, err
+	}
+	backup := path + ".corrupt"
+	if renameErr := os.Rename(path, backup); renameErr != nil {
+		return fallback, fmt.Errorf("%w (could not move it aside: %w)", err, renameErr)
+	}
+	return fallback, fmt.Errorf("%w; moved it to %s and started with defaults", err, backup)
 }
 
 // applyDefaults fills in unit preferences that are missing from c.

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -327,5 +328,15 @@ func TestRenderDailyForecastEscapesDate(t *testing.T) {
 	got := renderDailyForecast(fc, "°C", "km/h")
 	if strings.Contains(got, "[red]2026") {
 		t.Errorf("unescaped date reached output: %q", got)
+	}
+}
+
+func TestConfigWarningEscapesError(t *testing.T) {
+	got := configWarning(errors.New("bad [red]path"))
+	if strings.Contains(got, "[red]path") {
+		t.Errorf("unescaped error text in %q", got)
+	}
+	if !strings.Contains(got, "Could not load your saved settings") {
+		t.Errorf("missing heading in %q", got)
 	}
 }
