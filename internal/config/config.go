@@ -117,11 +117,39 @@ func (c *Config) Save() error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := writeFileAtomic(path, data); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	return nil
+}
+
+// writeFileAtomic writes data to a temporary file next to path and renames
+// it over path. Rename is atomic on the same filesystem, so a crash or full
+// disk mid-write leaves either the old file or the new one, never a
+// truncated one. os.CreateTemp creates the file with 0600 permissions.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// After a successful rename tmpName no longer exists and Remove is a
+	// harmless no-op; on any failure it cleans up the partial file.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // sameFavorite reports whether a and b refer to the same favorite. Name and

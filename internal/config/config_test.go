@@ -191,6 +191,44 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveIsAtomicAndPrivate(t *testing.T) {
+	redirectConfigHome(t)
+
+	path, _ := GetConfigPath()
+	first := &Config{Favorites: []weather.City{{Name: "Paris", Country: "FR"}}}
+	if err := first.Save(); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	second := &Config{Favorites: []weather.City{{Name: "Oslo", Country: "NO"}}, WindUnit: "mph"}
+	if err := second.Save(); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+
+	loaded, err := Load()
+	if err != nil || len(loaded.Favorites) != 1 || loaded.Favorites[0].Name != "Oslo" {
+		t.Fatalf("expected second save to replace the first, got %+v (err=%v)", loaded, err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Errorf("expected 0600 permissions, got %v", info.Mode().Perm())
+	}
+
+	// No temp files may be left behind next to the config.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			t.Errorf("unexpected leftover file %q", e.Name())
+		}
+	}
+}
+
 func TestAddFavoriteAppends(t *testing.T) {
 	cfg := &Config{}
 	cfg.AddFavorite(weather.City{Name: "Berlin", Country: "DE"})
