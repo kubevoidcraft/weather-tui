@@ -80,11 +80,10 @@ const asciiArt = `
 
 // NewApp creates and initializes a new App instance with all UI components.
 func NewApp() *App {
-	cfg, err := config.Load()
-	if err != nil {
-		// Log or handle, for now we will just start with empty config if it totally fails
-		cfg = &config.Config{}
-	}
+	// LoadOrRecover always returns a usable config. A malformed file is moved
+	// aside rather than overwritten by the next save; the error is shown in
+	// the main view below so the user knows what happened.
+	cfg, cfgErr := config.LoadOrRecover()
 
 	// Material Design Theme Colors
 	bgColor := tview.Styles.PrimitiveBackgroundColor
@@ -124,7 +123,16 @@ func NewApp() *App {
 		SettingsForm: settingsForm,
 	}
 	a.setupUI()
+	if cfgErr != nil {
+		a.MainView.SetText(configWarning(cfgErr))
+	}
 	return a
+}
+
+// configWarning formats a startup notice for a config that could not be
+// loaded. The error text includes a file path and is escaped for display.
+func configWarning(err error) string {
+	return "\n  [yellow::b]Could not load your saved settings[-]\n  " + tview.Escape(err.Error()) + "\n"
 }
 
 func (a *App) setupUI() {
@@ -145,7 +153,7 @@ func (a *App) setupUI() {
 		a.CurrentCity = &city
 		a.highlightFavorite(index)
 
-		a.MainView.SetText(fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", city.Label()))
+		a.MainView.SetText(loadingText(city))
 		go a.fetchForecast(city)
 	})
 
@@ -319,7 +327,7 @@ func (a *App) setupUI() {
 			// selection so the sidebar does not falsely imply one is active.
 			a.highlightFavorite(a.favoriteIndex(city))
 			// We trigger forecast fetch here asynchronously
-			a.MainView.SetText(fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", city.Label()))
+			a.MainView.SetText(loadingText(city))
 			go a.fetchForecast(city)
 		}
 	})
@@ -412,7 +420,7 @@ func (a *App) setupGlobalKeybindings() {
 				// there so the selection is visibly indicated to the user.
 				a.highlightFavorite(idx)
 				a.App.SetFocus(a.Sidebar)
-				a.MainView.SetText(fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", city.Label()))
+				a.MainView.SetText(loadingText(city))
 				go a.fetchForecast(city)
 			}
 			return nil
@@ -559,7 +567,7 @@ func (a *App) executeSearch(query string, seq uint64) {
 	a.App.QueueUpdateDraw(func() {
 		if err != nil {
 			a.SearchList.Clear()
-			a.SearchList.AddItem("Error finding city", err.Error(), 0, nil)
+			a.SearchList.AddItem("Error finding city", tview.Escape(err.Error()), 0, nil)
 			if !a.hasItem(a.MainFlex, a.SearchList) {
 				// Insert before command link
 				a.MainFlex.AddItem(a.SearchList, 3, 0, false)
@@ -573,7 +581,7 @@ func (a *App) executeSearch(query string, seq uint64) {
 			if i >= 10 { // Limit suggestions
 				break
 			}
-			a.SearchList.AddItem(r.Label(), fmt.Sprintf("Lat: %.2f, Lon: %.2f", r.Lat, r.Lon), 0, nil)
+			a.SearchList.AddItem(cityLabel(r), fmt.Sprintf("Lat: %.2f, Lon: %.2f", r.Lat, r.Lon), 0, nil)
 		}
 
 		if len(results) > 0 {
@@ -597,7 +605,7 @@ func (a *App) fetchForecast(city weather.City) {
 	forecast, err := weather.GetForecast(ctx, city.Lat, city.Lon, city.Timezone, a.Config.TemperatureUnit, a.Config.WindUnit)
 	a.App.QueueUpdateDraw(func() {
 		if err != nil {
-			a.MainView.SetText(fmt.Sprintf("Error fetching forecast: %v", err))
+			a.MainView.SetText("Error fetching forecast: " + tview.Escape(err.Error()))
 			return
 		}
 
@@ -606,7 +614,7 @@ func (a *App) fetchForecast(city weather.City) {
 		tempLabel, windLabel := a.unitLabels()
 
 		// Header line identifying the city being shown.
-		out := fmt.Sprintf("\n  [white::b]📍 %s[-]\n  [gray]Timezone: %s[-]\n\n", city.Label(), city.Timezone)
+		out := renderCityHeader(city)
 
 		// The current weather and hourly forecast are rendered as two columns
 		// when there is enough horizontal space; otherwise they stack.
@@ -655,7 +663,7 @@ func renderDailyForecast(forecast *weather.Forecast, tempLabel, windLabel string
 		wind := dailyWind(forecast.Daily.WindSpeed10mMax, i)
 
 		b.WriteString("  ")
-		b.WriteString(padVisible("[yellow]"+date+"[-]", dateWidth))
+		b.WriteString(padVisible("[yellow]"+tview.Escape(date)+"[-]", dateWidth))
 		b.WriteString("  ")
 		b.WriteString(padVisible(cond, condWidth))
 		b.WriteString(padVisible(fmt.Sprintf("[blue]▼ %.1f%s[-]", minT, tempLabel), tempWidth))
@@ -750,7 +758,7 @@ func renderHourlyPanel(forecast *weather.Forecast, city weather.City, tempLabel,
 
 	return []string{
 		fmt.Sprintf("  [teal::b]Next %d hours[-]", len(times)),
-		labelPrefix + strings.Join(hourLabels, " "),
+		labelPrefix + tview.Escape(strings.Join(hourLabels, " ")),
 		tempPrefix + spaceOut3(sparkline(temps)) + "  " + summarize(temps, tempLabel, "%.0f"),
 		windPrefix + spaceOut3(sparkline(winds)) + "  " + summarize(winds, windLabel, "%.0f"),
 		rainPrefix + spaceOut3(shaded(rains)) + "  " + summarize(rains, "%%", "%.0f"),
@@ -874,6 +882,25 @@ func (a *App) joinPanels(left, right []string) string {
 	return b.String()
 }
 
+// cityLabel returns c's display label with tview style tags escaped. City
+// names and countries come from the geocoding API or the config file, and
+// every widget here interprets "[...]" as markup, so this text must be
+// escaped before display or it could recolor, hide or fake screen content.
+func cityLabel(c weather.City) string {
+	return tview.Escape(c.Label())
+}
+
+// loadingText is the placeholder shown while a city's forecast is fetched.
+func loadingText(c weather.City) string {
+	return fmt.Sprintf("\n[teal]  Loading forecast for %s...[-]", cityLabel(c))
+}
+
+// renderCityHeader returns the two-line heading naming the city and its
+// timezone above the forecast. Both values are untrusted and escaped.
+func renderCityHeader(c weather.City) string {
+	return fmt.Sprintf("\n  [white::b]📍 %s[-]\n  [gray]Timezone: %s[-]\n\n", cityLabel(c), tview.Escape(c.Timezone))
+}
+
 // padVisible right-pads s with spaces until its visible width (ignoring tview
 // style tags) reaches width. If s is already wider, it is returned unchanged.
 // This keeps column alignment correct even when lines contain color markup.
@@ -902,7 +929,7 @@ func (a *App) refreshFavorites() {
 	for i, f := range a.Config.Favorites {
 		// Show city label as main, local time as secondary
 		timeStr := f.LocalTime().Format("15:04 (MST)")
-		a.Sidebar.AddItem(" "+f.Label(), "     "+timeStr, rune('1'+i), nil)
+		a.Sidebar.AddItem(" "+cityLabel(f), "     "+timeStr, rune('1'+i), nil)
 	}
 	if len(a.Config.Favorites) == 0 {
 		a.Sidebar.AddItem(" No Favorites", "   Press 'f' to add", 0, nil)

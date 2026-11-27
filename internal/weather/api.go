@@ -40,6 +40,11 @@ const (
 // user-input issues from network failures.
 var ErrQueryTooShort = errors.New("query too short (minimum 3 characters)")
 
+// ErrMalformedForecast is returned when a forecast response's parallel
+// arrays disagree in length. The UI indexes them in lockstep with their Time
+// slice, so accepting such a response would crash the renderer.
+var ErrMalformedForecast = errors.New("malformed forecast response")
+
 // SearchResult represents the top-level JSON response from the Open-Meteo Geocoding API.
 type SearchResult struct {
 	Results []City `json:"results"`
@@ -154,5 +159,38 @@ func GetForecast(ctx context.Context, lat, lon float64, timezone, tempUnit, wind
 	if err := doJSON(ctx, reqURL, &res); err != nil {
 		return nil, fmt.Errorf("weather %w", err)
 	}
+	if err := res.validate(); err != nil {
+		return nil, fmt.Errorf("weather %w", err)
+	}
 	return &res, nil
+}
+
+// validate checks that every hourly and daily series is index-aligned with
+// its Time slice, so callers can index them together without bounds checks.
+// Daily wind may be absent entirely (the UI skips that column), but if it is
+// present it must be aligned too.
+func (f *Forecast) validate() error {
+	hours, days := len(f.Hourly.Time), len(f.Daily.Time)
+	checks := []struct {
+		name      string
+		got, want int
+		optional  bool
+	}{
+		{"hourly.temperature_2m", len(f.Hourly.Temperature2m), hours, false},
+		{"hourly.wind_speed_10m", len(f.Hourly.WindSpeed10m), hours, false},
+		{"hourly.precipitation_probability", len(f.Hourly.PrecipitationProbability), hours, false},
+		{"daily.weather_code", len(f.Daily.WeatherCode), days, false},
+		{"daily.temperature_2m_max", len(f.Daily.Temperature2mMax), days, false},
+		{"daily.temperature_2m_min", len(f.Daily.Temperature2mMin), days, false},
+		{"daily.wind_speed_10m_max", len(f.Daily.WindSpeed10mMax), days, true},
+	}
+	for _, c := range checks {
+		if c.optional && c.got == 0 {
+			continue
+		}
+		if c.got != c.want {
+			return fmt.Errorf("%w: %s has %d entries, time has %d", ErrMalformedForecast, c.name, c.got, c.want)
+		}
+	}
+	return nil
 }

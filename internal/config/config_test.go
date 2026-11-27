@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,8 +104,64 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	if _, err := Load(); err == nil {
-		t.Errorf("expected error on malformed JSON")
+	_, err := Load()
+	if !errors.Is(err, ErrMalformedConfig) {
+		t.Errorf("expected ErrMalformedConfig, got %v", err)
+	}
+}
+
+func TestLoadOrRecoverMovesMalformedFileAside(t *testing.T) {
+	redirectConfigHome(t)
+
+	path, _ := GetConfigPath()
+	corrupt := []byte(`{"favorites":[{"name":"Paris"`)
+	if err := os.WriteFile(path, corrupt, 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	cfg, err := LoadOrRecover()
+	if !errors.Is(err, ErrMalformedConfig) {
+		t.Fatalf("expected ErrMalformedConfig, got %v", err)
+	}
+	if cfg == nil || cfg.TemperatureUnit != "celsius" || cfg.WindUnit != "kmh" {
+		t.Fatalf("expected default config, got %+v", cfg)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("expected corrupt file to be moved away from %s, stat err=%v", path, statErr)
+	}
+	backup := path + ".corrupt"
+	saved, readErr := os.ReadFile(backup) //nolint:gosec // path is inside the test's temp dir.
+	if readErr != nil || string(saved) != string(corrupt) {
+		t.Errorf("expected original bytes preserved in .corrupt, got %q (err=%v)", saved, readErr)
+	}
+
+	// The next Save must not touch the preserved copy.
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if again, _ := os.ReadFile(backup); string(again) != string(corrupt) { //nolint:gosec // test temp dir.
+		t.Errorf(".corrupt changed after Save: %q", again)
+	}
+}
+
+func TestLoadOrRecoverPassesThroughValidAndMissing(t *testing.T) {
+	redirectConfigHome(t)
+
+	cfg, err := LoadOrRecover()
+	if err != nil || cfg.TemperatureUnit != "celsius" {
+		t.Fatalf("missing file: cfg=%+v err=%v", cfg, err)
+	}
+
+	path, _ := GetConfigPath()
+	if err := os.WriteFile(path, []byte(`{"favorites":[],"wind_unit":"mph"}`), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	cfg, err = LoadOrRecover()
+	if err != nil || cfg.WindUnit != "mph" {
+		t.Fatalf("valid file: cfg=%+v err=%v", cfg, err)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); !os.IsNotExist(statErr) {
+		t.Errorf("valid file must not be moved aside")
 	}
 }
 
@@ -131,6 +188,44 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.TemperatureUnit != "fahrenheit" || loaded.WindUnit != "mph" {
 		t.Errorf("units not persisted: %+v", loaded)
+	}
+}
+
+func TestSaveIsAtomicAndPrivate(t *testing.T) {
+	redirectConfigHome(t)
+
+	path, _ := GetConfigPath()
+	first := &Config{Favorites: []weather.City{{Name: "Paris", Country: "FR"}}}
+	if err := first.Save(); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	second := &Config{Favorites: []weather.City{{Name: "Oslo", Country: "NO"}}, WindUnit: "mph"}
+	if err := second.Save(); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+
+	loaded, err := Load()
+	if err != nil || len(loaded.Favorites) != 1 || loaded.Favorites[0].Name != "Oslo" {
+		t.Fatalf("expected second save to replace the first, got %+v (err=%v)", loaded, err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Errorf("expected 0600 permissions, got %v", info.Mode().Perm())
+	}
+
+	// No temp files may be left behind next to the config.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			t.Errorf("unexpected leftover file %q", e.Name())
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -282,5 +283,60 @@ func TestRenderDailyForecastSkipsMissingWind(t *testing.T) {
 	out := renderDailyForecast(fc, "°C", "km/h")
 	if strings.Contains(out, "💨") {
 		t.Errorf("expected no wind column when data missing, got:\n%s", out)
+	}
+}
+
+// hostileName contains tview color, attribute and region tags. Rendered
+// unescaped it would display as 4 characters ("Fake") with injected styling.
+const hostileName = `[red:white:b]Fake["evil"]`
+
+func TestCityLabelEscapesStyleTags(t *testing.T) {
+	c := weather.City{Name: hostileName, Country: "[blue]XX"}
+	got := cityLabel(c)
+	// Escaped text must render every character of the raw label literally.
+	if w, want := tview.TaggedStringWidth(got), len([]rune(c.Label())); w != want {
+		t.Errorf("visible width = %d, want %d (tags were interpreted): %q", w, want, got)
+	}
+}
+
+func TestLoadingTextEscapesCityName(t *testing.T) {
+	got := loadingText(weather.City{Name: hostileName})
+	if strings.Contains(got, hostileName) {
+		t.Errorf("raw city name reached the view unescaped: %q", got)
+	}
+	if !strings.Contains(got, tview.Escape(hostileName)) {
+		t.Errorf("expected escaped city name in %q", got)
+	}
+}
+
+func TestRenderCityHeaderEscapesNameAndTimezone(t *testing.T) {
+	got := renderCityHeader(weather.City{Name: hostileName, Timezone: "[green]Fake/Zone"})
+	for _, raw := range []string{hostileName, "[green]Fake/Zone"} {
+		if strings.Contains(got, raw) {
+			t.Errorf("unescaped %q in header %q", raw, got)
+		}
+	}
+}
+
+func TestRenderDailyForecastEscapesDate(t *testing.T) {
+	fc := &weather.Forecast{Daily: weather.DailyWeather{
+		Time:             []string{"[red]2026-01-01"},
+		WeatherCode:      []int{0},
+		Temperature2mMax: []float64{1},
+		Temperature2mMin: []float64{0},
+	}}
+	got := renderDailyForecast(fc, "°C", "km/h")
+	if strings.Contains(got, "[red]2026") {
+		t.Errorf("unescaped date reached output: %q", got)
+	}
+}
+
+func TestConfigWarningEscapesError(t *testing.T) {
+	got := configWarning(errors.New("bad [red]path"))
+	if strings.Contains(got, "[red]path") {
+		t.Errorf("unescaped error text in %q", got)
+	}
+	if !strings.Contains(got, "Could not load your saved settings") {
+		t.Errorf("missing heading in %q", got)
 	}
 }

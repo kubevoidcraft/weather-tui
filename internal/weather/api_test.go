@@ -204,6 +204,63 @@ func TestGetForecastDefaultsTimezoneToAuto(t *testing.T) {
 	})
 }
 
+// forecastJSON builds a minimal forecast payload from raw hourly and daily
+// JSON objects so tests can vary array lengths independently.
+func forecastJSON(hourly, daily string) string {
+	return `{"latitude":0,"longitude":0,"timezone":"UTC",` +
+		`"current":{"time":"","temperature_2m":0,"wind_speed_10m":0,"weather_code":0},` +
+		`"hourly":` + hourly + `,"daily":` + daily + `}`
+}
+
+const (
+	validHourly = `{"time":["2026-04-19T00:00","2026-04-19T01:00"],"temperature_2m":[1,2],"wind_speed_10m":[3,4],"precipitation_probability":[0,5]}`
+	validDaily  = `{"time":["2026-04-19","2026-04-20"],"weather_code":[1,2],"temperature_2m_max":[9,10],"temperature_2m_min":[1,2],"wind_speed_10m_max":[5,6]}`
+)
+
+func TestGetForecastValidatesArrayLengths(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"aligned", forecastJSON(validHourly, validDaily), false},
+		{"daily wind absent is allowed",
+			forecastJSON(validHourly, `{"time":["2026-04-19"],"weather_code":[1],"temperature_2m_max":[9],"temperature_2m_min":[1]}`), false},
+		{"short daily min temps",
+			forecastJSON(validHourly, `{"time":["2026-04-19","2026-04-20"],"weather_code":[1,2],"temperature_2m_max":[9,10],"temperature_2m_min":[1]}`), true},
+		{"short daily wind",
+			forecastJSON(validHourly, `{"time":["2026-04-19","2026-04-20"],"weather_code":[1,2],"temperature_2m_max":[9,10],"temperature_2m_min":[1,2],"wind_speed_10m_max":[5]}`), true},
+		{"missing hourly series",
+			forecastJSON(`{"time":["2026-04-19T00:00","2026-04-19T01:00"],"temperature_2m":[1,2]}`, validDaily), true},
+		{"too many hourly values",
+			forecastJSON(`{"time":["2026-04-19T00:00"],"temperature_2m":[1,2],"wind_speed_10m":[3],"precipitation_probability":[0]}`, validDaily), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			withStubbedURL(&weatherAPIURL, srv.URL, func() {
+				fc, err := GetForecast(context.Background(), 0, 0, "UTC", "celsius", "kmh")
+				if !tt.wantErr {
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+					return
+				}
+				if !errors.Is(err, ErrMalformedForecast) {
+					t.Fatalf("expected ErrMalformedForecast, got %v", err)
+				}
+				if fc != nil {
+					t.Errorf("expected nil forecast on validation error")
+				}
+			})
+		})
+	}
+}
+
 func TestGetForecastSurfacesHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
